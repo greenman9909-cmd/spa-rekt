@@ -1,0 +1,4 @@
+node_modules/
+rekt-output/
+*.log
+.DS_Store

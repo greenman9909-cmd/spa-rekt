@@ -68,7 +68,7 @@ const sec  = (...a) => console.log(`${C.magenta}[SECRET]${C.reset}`, ...a);
 const REPORT = {
   target: TARGET, timestamp: new Date().toISOString(),
   tech: {}, waf: null,
-  assets: [], endpoints: [], secrets: [], vulns: [],
+  assets: [], endpoints: [], secrets: [], vulns: [], hardening: [],
   cors: [], authSurface: [], cookies: [], headers: {},
   subdomains: [], graphql: null, sourcemaps: [],
   harvested: [], wsEndpoints: [], params: [],
@@ -130,9 +130,20 @@ async function pool(tasks, limit=OPT.threads) {
 async function fingerprint() {
   log("Fingerprinting technology stack...");
   const res = await safe(TARGET);
-  REPORT.headers = res.headers;
-  const h = res.headers;
-  const body = res.text;
+  if (!res.status) {
+    throw new Error(`Initial request failed: ${res.error || "no HTTP response"}`);
+  }
+
+  REPORT.headers = res.headers || {};
+  REPORT.http = {
+    status: res.status,
+    bodyBytes: res.body?.length || 0,
+    redirected: res.status >= 300 && res.status < 400,
+    location: res.headers?.location || null,
+  };
+
+  const h = REPORT.headers;
+  const body = res.text || "";
   const tech = {};
 
   // Server / framework
@@ -785,33 +796,72 @@ async function harvestData() {
 }
 
 // ─── PHASE 15: SECURITY HEADER AUDIT ─────────────────────────────────────────
-function auditHeaders(h) {
+function auditHeaders(h, http = {}) {
   log("Auditing security headers...");
+
+  if (!h || Object.keys(h).length === 0) {
+    warn("  Header audit skipped: no response headers were captured.");
+    REPORT.hardening.push({
+      type: "Header Audit Incomplete",
+      severity: "INFO",
+      detail: "No response headers were captured; missing-header findings would be unreliable.",
+    });
+    return;
+  }
+
+  if (!http.status || http.status < 200 || http.status >= 300) {
+    const suffix = http.location ? ` -> ${http.location}` : "";
+    warn(`  Header audit limited: HTTP ${http.status || "unknown"}${suffix}`);
+    REPORT.hardening.push({
+      type: "Header Audit Limited",
+      severity: "INFO",
+      status: http.status || 0,
+      location: http.location || null,
+      detail: "Security-header absence on a redirect/error response is not treated as a vulnerability.",
+    });
+    return;
+  }
+
   const checks = [
-    ["content-security-policy",   "CRITICAL", "No CSP — XSS trivially exploitable"],
-    ["strict-transport-security", "HIGH",     "No HSTS — downgrade/MITM possible"],
-    ["x-frame-options",           "MEDIUM",   "No X-Frame-Options — clickjacking risk"],
-    ["x-content-type-options",    "LOW",      "No MIME sniff protection"],
-    ["referrer-policy",           "LOW",      "No Referrer-Policy"],
-    ["permissions-policy",        "INFO",     "No Permissions-Policy"],
+    ["content-security-policy",   "LOW",  "CSP header not present on this response; absence alone does not prove XSS."],
+    ["strict-transport-security", "LOW",  "HSTS header not present on this HTTPS response."],
+    ["x-content-type-options",    "LOW",  "X-Content-Type-Options header not present."],
+    ["referrer-policy",           "INFO", "Referrer-Policy header not present."],
+    ["permissions-policy",        "INFO", "Permissions-Policy header not present."],
   ];
+
   for (const [hdr, sev, msg] of checks) {
+    if (hdr === "strict-transport-security" && BASE.protocol !== "https:") continue;
     if (!h[hdr]) {
-      REPORT.vulns.push({ type:"Missing Security Header", severity:sev, header:hdr, detail:msg });
+      REPORT.hardening.push({ type:"Missing Security Header", severity:sev, header:hdr, detail:msg });
       warn(`  ${msg}`);
     }
   }
+
+  const csp = String(h["content-security-policy"] || "");
+  if (!h["x-frame-options"] && !/\bframe-ancestors\b/i.test(csp)) {
+    const msg = "No X-Frame-Options and no CSP frame-ancestors directive.";
+    REPORT.hardening.push({
+      type:"Missing Framing Protection",
+      severity:"LOW",
+      header:"x-frame-options",
+      detail:msg,
+    });
+    warn(`  ${msg}`);
+  }
+
   if (h.server)          warn(`  Server disclosed: ${h.server}`);
   if (h["x-powered-by"]) warn(`  X-Powered-By: ${h["x-powered-by"]}`);
 
   const sc = h["set-cookie"];
   if (sc) {
     const cookies = Array.isArray(sc) ? sc : [sc];
-    for (const c of cookies) {
-      if (!/HttpOnly/i.test(c)) REPORT.vulns.push({ type:"Cookie Missing HttpOnly", severity:"MEDIUM", detail:c.slice(0,80) });
-      if (!/Secure/i.test(c))   REPORT.vulns.push({ type:"Cookie Missing Secure",   severity:"MEDIUM", detail:c.slice(0,80) });
-      if (!/SameSite/i.test(c)) REPORT.vulns.push({ type:"Cookie Missing SameSite", severity:"MEDIUM", detail:c.slice(0,80) });
-      REPORT.cookies.push({ raw: c });
+    for (const cookie of cookies) {
+      const raw = String(cookie);
+      if (!/HttpOnly/i.test(raw)) REPORT.hardening.push({ type:"Cookie Missing HttpOnly", severity:"LOW", detail:raw.slice(0,80) });
+      if (BASE.protocol === "https:" && !/Secure/i.test(raw)) REPORT.hardening.push({ type:"Cookie Missing Secure", severity:"LOW", detail:raw.slice(0,80) });
+      if (!/SameSite/i.test(raw)) REPORT.hardening.push({ type:"Cookie Missing SameSite", severity:"LOW", detail:raw.slice(0,80) });
+      REPORT.cookies.push({ raw });
     }
   }
 }
@@ -823,6 +873,7 @@ function writeReport() {
 
   const uniqueEps = [...new Set(REPORT.endpoints.map(e=>e.endpoint))];
   const critVulns = REPORT.vulns.filter(v=>v.severity==="CRITICAL");
+  const hardening = REPORT.hardening || [];
 
   const md = [
     `# SPA-REKT v2 Report — ${HOST}`,
@@ -837,7 +888,8 @@ function writeReport() {
     `| Assets ripped | ${REPORT.assets.length} |`,
     `| Endpoints | ${uniqueEps.length} |`,
     `| Secrets found | ${REPORT.secrets.length} |`,
-    `| Vulnerabilities | ${REPORT.vulns.length} (${critVulns.length} CRITICAL) |`,
+    `| Confirmed/potential vulnerabilities | ${REPORT.vulns.length} (${critVulns.length} CRITICAL) |`,
+    `| Hardening observations | ${hardening.length} |`,
     `| CORS issues | ${REPORT.cors.length} |`,
     `| Subdomains | ${REPORT.subdomains.length} |`,
     `| WS endpoints | ${REPORT.wsEndpoints.length} |`,
@@ -849,6 +901,9 @@ function writeReport() {
     "",
     `## All Vulnerabilities (${REPORT.vulns.length})`,
     ...REPORT.vulns.map(v => `- [${v.severity||"?"}] **${v.type}** ${v.url||v.endpoint||""}`),
+    "",
+    `## Hardening Observations (${hardening.length})`,
+    ...hardening.map(v => `- [${v.severity||"INFO"}] **${v.type}** ${v.header ? `(${v.header})` : ""} — ${v.detail||""}`),
     "",
     `## Secrets (${REPORT.secrets.length})`,
     ...REPORT.secrets.map(s => `- **${s.type}** in \`${s.source}\`: \`${s.value.slice(0,80)}\``),
@@ -873,6 +928,7 @@ function writeReport() {
   console.log(`  Endpoints:    ${uniqueEps.length}`);
   console.log(`  Secrets:      ${REPORT.secrets.length}`);
   console.log(`  Vulns:        ${REPORT.vulns.length} ${critVulns.length ? `(${C.red}${critVulns.length} CRITICAL${C.reset})` : ""}`);
+  console.log(`  Hardening:    ${hardening.length} observations`);
   console.log(`  Subdomains:   ${REPORT.subdomains.length}`);
   console.log(`  WS Endpoints: ${REPORT.wsEndpoints.length}`);
   console.log(`  Sourcemaps:   ${REPORT.sourcemaps.length}`);
@@ -895,7 +951,7 @@ function writeReport() {
   try {
     const { html, headers } = await fingerprint();
     await detectWAF();
-    auditHeaders(headers);
+    auditHeaders(headers, REPORT.http || {});
     await ripAssets(html);
     await extractSourceMaps();
     await mineAll();

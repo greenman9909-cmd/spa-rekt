@@ -1,117 +1,141 @@
-# SPA-REKT
+# SPA-REKT v2
 
-> SPA security research framework — rip, mine, scan, report.
+> Full-spectrum web security research framework — rip, mine, attack, harvest, report.
 
-Pulls apart any React/Vue/Svelte SPA: extracts all assets, harvests API endpoints from minified JS bundles, finds hardcoded secrets, audits CORS misconfigurations, maps auth surface, checks security headers, and probes for common vulns.
-
-**Use on targets you own or have written authorization for.**
+Zero npm dependencies. Pure Node.js stdlib.
 
 ---
 
-## Features
+## Modules
 
-| Module | What it does |
-|---|---|
-| **Ripper** | Downloads all JS/CSS chunks, lazy-loaded bundles, static assets |
-| **Bundle Miner** | Regex-mines minified JS for API routes, auth endpoints, Vite chunk maps |
-| **Secret Extractor** | Finds API keys, JWTs, AWS keys, Stripe keys, hardcoded tokens, internal IPs |
-| **Endpoint Harvester** | Builds full API surface map from 10+ pattern classes |
-| **CORS Scanner** | Tests origin reflection, null-origin bypass, wildcard + credentials combos |
-| **Auth Scanner** | HTTP verb tampering, IDOR probing, JWT none-algorithm, unauthenticated access |
-| **Header Auditor** | CSP, HSTS, X-Frame-Options, cookie flags, server disclosure |
-| **Rate Limit Probe** | Fires 20 auth requests to detect missing rate limiting |
+| Module | Flag | What it does |
+|---|---|---|
+| **Tech Fingerprint** | always | Detects CMS, framework, build tool, CDN, payment stack |
+| **WAF Detect** | `--waf` | Identifies Cloudflare, AWS WAF, Akamai, Imperva, ModSecurity, F5, etc. |
+| **Asset Ripper** | always | Downloads all JS/CSS/font/image assets |
+| **Source Map Extractor** | `--sourcemap` | Recovers original source code from `.map` files, reconstructs file tree |
+| **Bundle Miner** | always | Regex-mines minified JS for API endpoints, secrets, WS endpoints |
+| **Secret Extractor** | `--secrets` | JWTs, API keys, AWS/Stripe/GH tokens, Firebase configs, passwords, SMTP creds |
+| **Subdomain Enum** | `--subs` | DNS brute force + crt.sh certificate transparency lookup |
+| **CORS Scanner** | `--cors` | Origin reflection, null-origin bypass, wildcard+credentials |
+| **SQL Injection** | `--sqli` | Error-based + time-based SQLi across all discovered endpoints |
+| **Path Traversal** | `--traversal` | LFI/directory traversal probing with 20+ payloads |
+| **SSRF** | `--ssrf` | AWS/GCP/Azure metadata exfil, localhost port scanning, gopher |
+| **XXE** | `--xxe` | XML external entity injection via POST to XML-accepting endpoints |
+| **GraphQL Dump** | `--graphql` | Introspection schema dump, field suggestion leak detection |
+| **Param Fuzzer** | `--fuzz` | SSTI, error triggering, unexpected-type injection |
+| **Data Harvester** | `--harvest` | Pulls all accessible API responses, flags PII/sensitive data |
+| **Auth Scanner** | `--auth` | HTTP verb tampering, IDOR, JWT none-algorithm, unauthenticated access |
+| **Security Headers** | always | CSP, HSTS, X-Frame-Options, cookie flags, server disclosure |
+
+---
 
 ## Install
 
 ```bash
-git clone https://github.com/YOUR_HANDLE/spa-rekt
+git clone https://github.com/greenman9909-cmd/spa-rekt
 cd spa-rekt
-# zero dependencies — pure Node.js stdlib
 node rekt.js --help
+# zero dependencies — pure Node.js 18+
 ```
 
 ## Usage
 
 ```bash
-# rip assets only
-node rekt.js https://target.com
-
 # full scan — all modules
 node rekt.js https://target.com --all
 
-# targeted modules
-node rekt.js https://target.com --cors --secrets --deep
+# targeted: SQLi + SSRF + GraphQL
+node rekt.js https://target.com --sqli --ssrf --graphql
 
-# with auth cookie + custom output
-node rekt.js https://target.com --all --cookie="session=abc123" --out=./results
+# source code recovery
+node rekt.js https://target.com --sourcemap --deep
 
-# with bearer token (JWT vuln testing)
+# subdomain recon + CORS
+node rekt.js https://target.com --subs --cors
+
+# with auth cookie
+node rekt.js https://target.com --all --cookie="session=abc123"
+
+# with bearer token (enables JWT attack testing)
 node rekt.js https://target.com --auth --token="eyJ..."
 
-# slow mode (delay between requests, ms)
-node rekt.js https://target.com --all --delay=500 --threads=4
+# slow/stealth mode
+node rekt.js https://target.com --all --delay=800 --threads=3
+
+# custom output dir
+node rekt.js https://target.com --all --out=./results/mysite
 ```
 
-## Flags
+## All Flags
 
 | Flag | Description |
 |---|---|
-| `--all` | Enable all scan modules |
-| `--deep` | Fetch all lazy chunks discovered in bundle maps |
-| `--vuln` | Probe discovered endpoints (GET, status codes, JSON extraction) |
-| `--secrets` | Secret extraction only |
+| `--all` | Enable all modules |
+| `--deep` | Fetch lazy chunks discovered in bundle maps |
+| `--waf` | WAF detection |
+| `--sourcemap` | Source map extraction + source reconstruction |
+| `--secrets` | Secret scanning only |
+| `--subs` | Subdomain enumeration (DNS + crt.sh) |
 | `--cors` | CORS misconfiguration scanner |
-| `--auth` | Auth surface scanner (verb tampering, IDOR, JWT) |
-| `--threads=N` | Parallel request workers (default: 8) |
-| `--delay=N` | Ms between requests (default: 0) |
-| `--cookie=` | Session cookie to include in all requests |
-| `--token=` | Bearer token for auth endpoint testing |
-| `--out=` | Output directory (default: `rekt-output/<hostname>`) |
+| `--auth` | Auth surface scanner |
+| `--sqli` | SQL injection probing (error + time-based) |
+| `--traversal` | Path traversal / LFI probing |
+| `--ssrf` | SSRF with cloud metadata targets |
+| `--xxe` | XXE injection via XML endpoints |
+| `--graphql` | GraphQL introspection + field suggestion leak |
+| `--fuzz` | Parameter fuzzing (SSTI, type confusion, 500 hunting) |
+| `--harvest` | Harvest accessible API responses, flag PII |
+| `--vuln` | Probe discovered endpoints |
+| `--ws` | WebSocket endpoint detection |
+| `--threads=N` | Parallel workers (default: 10) |
+| `--delay=N` | Ms delay between requests (default: 0) |
+| `--cookie=` | Session cookie |
+| `--token=` | Bearer token |
+| `--out=` | Output directory |
 | `--ua=` | Custom User-Agent |
+| `--wordlist=` | Custom wordlist for fuzzing (one entry per line) |
 
 ## Output
 
 ```
 rekt-output/
   target.com/
-    index.html          ← SPA shell
-    assets/             ← all JS/CSS chunks
-    probe-*.json        ← raw API responses from accessible endpoints
-    rekt-report.json    ← full machine-readable report
-    rekt-report.md      ← human-readable summary
+    index.html              ← SPA shell
+    assets/                 ← all JS/CSS/font chunks
+    sourcemaps/             ← .map files + reconstructed source trees
+      bundle.js.map
+      bundle.js-sources/    ← original source files recovered
+        src/
+          components/
+          pages/
+    harvested/              ← raw API JSON responses
+      api-user-profile.json
+      api-admin-config.json
+    graphql-schema.json     ← full GraphQL schema if introspection open
+    rekt-report.json        ← machine-readable full report
+    rekt-report.md          ← human-readable summary with exploits
 ```
 
-## Report Structure
+## SSRF Cloud Targets
 
-```json
-{
-  "target": "https://target.com",
-  "assets": [...],
-  "endpoints": [{ "endpoint": "/api/user", "source": "index.js" }],
-  "secrets": [{ "type": "JWT", "value": "eyJ...", "source": "vendor.js" }],
-  "vulns": [{ "type": "CORS Reflect+Credentials", "severity": "CRITICAL", "exploit": "..." }],
-  "cors": [...],
-  "cookies": [...],
-  "headers": { "server": "nginx/1.18", ... }
-}
-```
+Tests extraction from:
+- AWS EC2 Instance Metadata (`169.254.169.254`)
+- GCP Metadata (`metadata.google.internal`)
+- Alibaba Cloud (`100.100.100.200`)
+- Azure IMDS (`169.254.169.254/metadata`)
+- Localhost service ports (Redis 6379, MySQL 3306, MongoDB 27017)
 
-## Secret Patterns
+## SQLi Payloads
 
-Detects: Generic API keys · Bearer tokens · JWTs · AWS Access/Secret keys · Cloudflare tokens · Stripe keys · SendGrid API keys · Hardcoded passwords · Private keys · Firebase configs · GraphQL endpoints · Sentry DSNs · Webhook URLs · Internal IPs · URLs with embedded credentials
-
-## CORS Tests
-
-- Wildcard (`*`) with credentials
-- Origin reflection (arbitrary origin echoed back)
-- `null` origin bypass (sandboxed iframe attack)
-- Subdomain takeover surface (`target.evil.com`)
+Covers: MySQL, PostgreSQL, MSSQL, Oracle, SQLite, DB2  
+Detection: error signatures + time-based blind (SLEEP/WAITFOR)
 
 ## Requirements
 
 - Node.js 18+
-- No npm dependencies (stdlib only)
+- No npm dependencies
 
 ## License
 
-MIT — research use.
+MIT
